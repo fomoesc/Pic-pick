@@ -4,6 +4,16 @@ import sys
 import os
 from pathlib import Path
 
+# Windows: 在创建 QApplication 之前设置 AppUserModelID，确保任务栏图标正确分组
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "com.fomoesc.picpick"
+        )
+    except Exception:
+        pass
+
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -12,65 +22,60 @@ from style import build_app_qss
 from ui import MainWindow
 
 
-def _app_dir() -> Path:
-    """程序所在目录：打包后为 exe 所在目录，开发时为源码目录。"""
+def _find_icon() -> Path | None:
+    """查找应用图标文件（ICO 优先，PNG 回退）。
+
+    打包后：图标嵌入在 exe 资源中，同时作为数据文件解压到 sys._MEIPASS。
+    开发时：图标在源码目录。
+    """
+    candidates = ["app_icon.ico", "app_icon.png"]
+
+    # PyInstaller 打包后的临时解压目录
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+        meipass = Path(sys._MEIPASS) if hasattr(sys, "_MEIPASS") else None
+        exe_dir = Path(sys.executable).resolve().parent
+        search_dirs = [d for d in [meipass, exe_dir] if d]
+    else:
+        search_dirs = [Path(__file__).resolve().parent]
 
-
-def _set_taskbar_icon(icon_path: Path):
-    """用 Windows API 设置任务栏图标（解决开发环境下任务栏显示 Python 默认图标的问题）。"""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        # Windows AppUserModelID 让任务栏把同一 app 归为一组
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "com.fomoesc.picpick.v5"
-        )
-        # 设置 exe 图标（仅打包后有效）
-        if getattr(sys, "frozen", False):
-            ctypes.windll.user32.SetWindowIconW(
-                ctypes.windll.kernel32.GetConsoleWindow(), 0
-            )
-    except Exception:
-        pass
+    for d in search_dirs:
+        for name in candidates:
+            p = d / name
+            if p.exists():
+                return p
+    return None
 
 
 def main():
-    _set_taskbar_icon(None)
-
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
 
-    # 加载应用图标（同时用于任务栏和标题栏）
-    icon_path = _app_dir() / "app_icon.ico"
-    if not icon_path.exists():
-        icon_path = _app_dir() / "app_icon.png"
+    # 加载图标
+    icon_path = _find_icon()
+    if icon_path:
+        app.setWindowIcon(QIcon(str(icon_path)))
 
-    icon = QIcon()
-    if icon_path.exists():
-        icon = QIcon(str(icon_path))
-        app.setWindowIcon(icon)
-
-    # 设置默认中文字体，保证界面全中文正常显示
+    # 设置默认中文字体
     app.setFont(QFont("Microsoft YaHei", 10))
-    # 应用 v4 现代扁平化主题
+    # 应用橙色主题
     app.setStyleSheet(build_app_qss())
+
     win = MainWindow()
 
-    # 确保 MainWindow 也使用图标（任务栏 + 标题栏）
-    if not icon.isNull():
+    # 再次设置窗口图标（确保任务栏 + 标题栏都显示）
+    if icon_path:
+        icon = QIcon(str(icon_path))
         win.setWindowIcon(icon)
-        # Windows 任务栏强制刷新图标
+
+        # Windows: 通过 Win32 API 强制发送 WM_SETICON 消息
+        # 解决 PySide6 在某些 Win10/11 版本上任务栏图标不刷新的问题
         try:
             import ctypes
             hwnd = int(win.winId())
-            WM_SETICON = 0x0080
-            ICON_BIG = 1
-            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG,
-                                              icon.pixmap(64, 64).toWinHICON())
+            hicon = int(icon.pixmap(64, 64).toWinHICON())
+            # WM_SETICON = 0x0080, ICON_BIG = 1, ICON_SMALL = 0
+            ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, hicon)
+            ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, hicon)
         except Exception:
             pass
 
