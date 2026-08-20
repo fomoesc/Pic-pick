@@ -19,7 +19,28 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _set_taskbar_icon(icon_path: Path):
+    """用 Windows API 设置任务栏图标（解决开发环境下任务栏显示 Python 默认图标的问题）。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        # Windows AppUserModelID 让任务栏把同一 app 归为一组
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "com.fomoesc.picpick.v5"
+        )
+        # 设置 exe 图标（仅打包后有效）
+        if getattr(sys, "frozen", False):
+            ctypes.windll.user32.SetWindowIconW(
+                ctypes.windll.kernel32.GetConsoleWindow(), 0
+            )
+    except Exception:
+        pass
+
+
 def main():
+    _set_taskbar_icon(None)
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
 
@@ -27,8 +48,11 @@ def main():
     icon_path = _app_dir() / "app_icon.ico"
     if not icon_path.exists():
         icon_path = _app_dir() / "app_icon.png"
+
+    icon = QIcon()
     if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
+        icon = QIcon(str(icon_path))
+        app.setWindowIcon(icon)
 
     # 设置默认中文字体，保证界面全中文正常显示
     app.setFont(QFont("Microsoft YaHei", 10))
@@ -36,9 +60,19 @@ def main():
     app.setStyleSheet(build_app_qss())
     win = MainWindow()
 
-    # 确保 MainWindow 也使用图标
-    if icon_path.exists():
-        win.setWindowIcon(QIcon(str(icon_path)))
+    # 确保 MainWindow 也使用图标（任务栏 + 标题栏）
+    if not icon.isNull():
+        win.setWindowIcon(icon)
+        # Windows 任务栏强制刷新图标
+        try:
+            import ctypes
+            hwnd = int(win.winId())
+            WM_SETICON = 0x0080
+            ICON_BIG = 1
+            ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG,
+                                              icon.pixmap(64, 64).toWinHICON())
+        except Exception:
+            pass
 
     win.show()
     sys.exit(app.exec())
