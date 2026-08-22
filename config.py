@@ -21,8 +21,12 @@ THUMB_SIZE = 200
 THUMB_COLS = 4
 
 # ---- PDF 导出 ----
-# PDF 页渲染成图片时的缩放系数（2.0 ≈ 144 DPI，A4 宽约 1190px，贴合"1200px"目录语义）
+# PDF 页渲染成图片时的基础缩放系数（最低保障）
 PDF_EXPORT_ZOOM = 2.0
+# 导出图片最长边的最小像素数（保底 1200px）
+PDF_MIN_LONG_SIDE = 1200
+# 导出图片的最小 DPI（180 DPI 保证清晰度）
+PDF_MIN_DPI = 180
 # 导出的 JPG 质量（1-100）
 EXPORT_JPEG_QUALITY = 92
 
@@ -33,7 +37,7 @@ MOUSE_GESTURE_THRESHOLD = 50
 
 # ---- 应用 ----
 APP_NAME = "拼版选图导出工作台"
-APP_VERSION = "5.0.1"
+APP_VERSION = "5.1.0"
 
 # ---- 封面 ----
 # 封面缩略图高亮边框颜色（金色）
