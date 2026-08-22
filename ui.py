@@ -95,6 +95,74 @@ class ScanTask(QRunnable):
             self.signals.scan_error.emit(str(e))
 
 
+class PreGenThumbsTask(QRunnable):
+    """扫描完成后后台预生成所有缩略图到磁盘缓存。
+
+    只写 JPEG 缓存文件，不生成 QImage，速度比 make_thumb 快几倍。
+    """
+    def __init__(self, folders, thumb_size=200):
+        super().__init__()
+        self.folders = folders
+        self.thumb_size = thumb_size
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        import disk_cache
+        from PIL import Image, ImageOps
+        from thumbnail import _flatten_to_rgb, _thumb_pil
+        import pdf_render
+
+        for folder in self.folders:
+            if self._cancelled:
+                return
+            items = folder.ordered_items()
+            for item in items:
+                if self._cancelled:
+                    return
+                try:
+                    if item.kind == "image":
+                        self._gen_image_cache(item.path)
+                    else:
+                        self._gen_pdf_cache(item.path, item.page_index)
+                except Exception:
+                    pass
+
+    def _gen_image_cache(self, path):
+        """只生成磁盘缓存，不返回 QImage。"""
+        import disk_cache
+        from PIL import Image, ImageOps
+        from thumbnail import _flatten_to_rgb, _thumb_pil
+        cached = disk_cache.get_cache(path, self.thumb_size)
+        if cached:
+            return
+        with Image.open(path) as im:
+            try:
+                im = ImageOps.exif_transpose(im)
+            except Exception:
+                pass
+            rgb = _flatten_to_rgb(im)
+            w, h = rgb.size
+            if max(w, h) > 2000:
+                scale = (self.thumb_size * 4) / max(w, h)
+                rgb = rgb.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            thumb = _thumb_pil(rgb, self.thumb_size)
+            disk_cache.save_cache(path, self.thumb_size, thumb)
+
+    def _gen_pdf_cache(self, pdf_path, page_index):
+        """只生成磁盘缓存，不返回 QImage。"""
+        import disk_cache
+        cache_key = f"{pdf_path}_p{page_index}"
+        cached = disk_cache.get_cache(cache_key, self.thumb_size)
+        if cached:
+            return
+        img = pdf_render.render_pdf_page_fit(pdf_path, page_index, self.thumb_size)
+        thumb = _thumb_pil(img, self.thumb_size)
+        disk_cache.save_cache(cache_key, self.thumb_size, thumb)
+
+
 class LoadTask(QRunnable):
     def __init__(self, generation, folder, signals):
         super().__init__()
@@ -401,6 +469,20 @@ class SettingsDialog(QDialog):
         sr.addWidget(self.combo_thumb)
         sr.addStretch(1)
         lay.addLayout(sr)
+        # ── 磁盘缓存管理 ──
+        import disk_cache
+        cache_row = QHBoxLayout()
+        cache_info = QLabel(f"缩略图缓存：{disk_cache.get_cache_size()}（{disk_cache.get_cache_count()} 个文件）")
+        cache_info.setStyleSheet("color:#6b7280; font-size:12px;")
+        cache_row.addWidget(cache_info)
+        self._cache_info_label = cache_info
+        clear_cache_btn = QPushButton("清空缓存")
+        clear_cache_btn.setObjectName("clearBtn")
+        clear_cache_btn.setFixedWidth(80)
+        clear_cache_btn.clicked.connect(self._on_clear_cache)
+        cache_row.addWidget(clear_cache_btn)
+        cache_row.addStretch(1)
+        lay.addLayout(cache_row)
         tip = QLabel(
             "键盘快捷键：\n  Up/Down  切换文件夹\n  PageUp/Down  快速翻页\n"
             "  Space  勾选/取消\n  C  设为封面\n  Esc  取消封面\n"
@@ -420,6 +502,20 @@ class SettingsDialog(QDialog):
         lay.addLayout(btns)
         ok.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)
+
+    def _on_clear_cache(self):
+        """清空缩略图磁盘缓存。"""
+        import disk_cache
+        count = disk_cache.get_cache_count()
+        size = disk_cache.get_cache_size()
+        reply = QMessageBox.question(
+            self, "清空缓存",
+            f"确定清空缩略图缓存吗？\n\n当前缓存：{size}（{count} 个文件）\n清空后下次打开文件夹将重新生成缩略图。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            disk_cache.clear_cache()
+            self._cache_info_label.setText(f"缩略图缓存：{disk_cache.get_cache_size()}（{disk_cache.get_cache_count()} 个文件）")
+            QMessageBox.information(self, "清空完成", "缩略图缓存已清空。")
 
     def accept(self):
         self.cfg["mouse_gesture"] = self.chk_gesture.isChecked()
@@ -490,7 +586,6 @@ class CollapsibleGroup(QWidget):
         self._title = title
         self._icon = icon
         self._expanded = True
-        self._anim = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 2)
         outer.setSpacing(0)
@@ -509,34 +604,12 @@ class CollapsibleGroup(QWidget):
         self._sync()
 
     def _sync(self):
-        a = "v" if self._expanded else ">"
+        a = "▼" if self._expanded else "▶"
         self.header.setText(f"{a}  {self._icon}  {self._title}")
         self.body.setVisible(self._expanded)
 
     def _on_toggle(self, checked):
         self._expanded = checked
-        if self._anim:
-            self._anim.stop()
-        if self._expanded:
-            self.body.setVisible(True)
-            self.body.setMaximumHeight(0)
-            target = max(self.body.sizeHint().height(), 100)
-            a = QPropertyAnimation(self.body, b"maximumHeight", self)
-            a.setDuration(150)
-            a.setStartValue(0)
-            a.setEndValue(target)
-            a.finished.connect(lambda: self.body.setMaximumHeight(16777215))
-            a.start()
-            self._anim = a
-        else:
-            current_h = self.body.height()
-            a = QPropertyAnimation(self.body, b"maximumHeight", self)
-            a.setDuration(150)
-            a.setStartValue(current_h)
-            a.setEndValue(0)
-            a.finished.connect(lambda: self.body.setVisible(False))
-            a.start()
-            self._anim = a
         self._sync()
 
 
@@ -718,14 +791,10 @@ class ThumbWidget(QFrame):
         self.cover_label.setVisible(visible)
 
     def set_pixmap(self, pixmap):
-        """设置缩略图 — 按比例缩放不裁切，居中显示，无覆盖层。"""
+        """设置缩略图 — 始终缩放到 THUMB_DISPLAY_SIZE，保持比例。"""
         self._pixmap = pixmap
-        area_w = self.thumb.width() - 4
-        area_h = self.thumb.height() - 4
-        if area_w < 20 or area_h < 20:
-            area_w = THUMB_DISPLAY_SIZE
-            area_h = THUMB_DISPLAY_SIZE
-        scaled = pixmap.scaled(area_w, area_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled = pixmap.scaled(THUMB_DISPLAY_SIZE, THUMB_DISPLAY_SIZE,
+                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.thumb.setPixmap(scaled)
         self._update_check_pos()
         self.cover_btn.raise_()
@@ -735,8 +804,6 @@ class ThumbWidget(QFrame):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self._pixmap:
-            self.set_pixmap(self._pixmap)
         self._update_check_pos()
         self.cover_btn.raise_()
 
@@ -759,7 +826,9 @@ class MainWindow(QMainWindow):
         self.selection = {}
         self.covers = {}
         self.item_folder = {}
-        self.thumb_cache = {}
+        from collections import OrderedDict
+        self.thumb_cache = OrderedDict()  # LRU 缓存，最多保留 _thumb_cache_max 张
+        self._thumb_cache_max = 200  # 内存缓存上限
         self.generation = 0
         self.current_load_task = None
         self.thumb_widgets = {}
@@ -885,6 +954,7 @@ class MainWindow(QMainWindow):
         self._build_log_area(ml)
         self.nav_filter = PreviewNavFilter(self)
         self.installEventFilter(self.nav_filter)
+        self._setup_lazy_load()
 
     def _set_splitter_ratio(self, ratio):
         total = self.splitter.width()
@@ -1114,6 +1184,9 @@ class MainWindow(QMainWindow):
         if not src or not os.path.isdir(src):
             QMessageBox.warning(self, "提示", "请选择有效的来源文件夹。")
             return
+        # 取消旧的预生成任务
+        if hasattr(self, '_pregen_task') and self._pregen_task:
+            self._pregen_task.cancel()
         self._remember_paths()
         self.scan_btn.setEnabled(False)
         self.scan_status_icon.setStyleSheet(f"color:#f59e0b; font-size:20px; font-weight:bold; background:transparent;")
@@ -1148,6 +1221,10 @@ class MainWindow(QMainWindow):
         self.scan_status_detail.setText(f"找到 {len(folders)} 个文件夹，共 {total_items} 项")
         self._populate_folder_list()
         self._remember_paths()
+        # 后台预生成所有缩略图到磁盘缓存
+        thumb_size = self.settings_cfg.get("thumb_size", THUMB_SIZE)
+        self._pregen_task = PreGenThumbsTask(folders, thumb_size)
+        self.threadpool.start(self._pregen_task)
 
     def on_scan_error(self, msg):
         self.scan_btn.setEnabled(True)
@@ -1246,19 +1323,29 @@ class MainWindow(QMainWindow):
             self._build_flat_preview(items)
         self.preview_container.updateGeometry()
         self.preview_scroll.updateGeometry()
-        thumb_size = self.settings_cfg.get("thumb_size", THUMB_SIZE)
-        task = ThumbTask(gen, items, self.signals, thumb_size)
-        self.threadpool.start(task)
+        # 懒加载：延迟首次加载，等 layout 完成后坐标才准确
+        QTimer.singleShot(150, self._load_visible_thumbs)
         self._update_sel_count()
 
     def _build_grouped_preview(self, groups):
-        """按分组构建预览：图片和PDF分开，每个PDF独立区块。"""
+        """按分组构建预览：每个子文件夹一个可折叠区块，带分隔线。"""
+        first_group = True
         for grp in groups:
             grp_items = grp.ordered_items()
             if not grp_items:
                 continue
+            # 分组间分隔线（第一个分组前不加）
+            if not first_group:
+                grp_sep = QFrame()
+                grp_sep.setFrameShape(QFrame.HLine)
+                grp_sep.setFixedHeight(2)
+                grp_sep.setStyleSheet(f"background:{BRAND_BORDER};")
+                grp_sep.setContentsMargins(16, 8, 16, 8)
+                self.preview_inner.addWidget(grp_sep)
+            first_group = False
+
             item_count = len(grp_items)
-            grp_title = f"{grp.name}（{item_count} 项）"
+            grp_title = f"📁 {grp.name}（{item_count} 项）"
             cg = CollapsibleGroup(grp_title)
             images = [it for it in grp_items if it.kind == "image"]
             pdfs = [it for it in grp_items if it.kind == "pdf"]
@@ -1313,6 +1400,9 @@ class MainWindow(QMainWindow):
 
             cg.body_layout.addLayout(inner_layout)
             self.preview_inner.addWidget(cg)
+
+        # 末尾加 stretch，防止分组被均匀拉伸分散到整个页面
+        self.preview_inner.addStretch(1)
 
     def _build_flat_preview(self, items):
         """无分组时扁平展示。"""
@@ -1411,12 +1501,19 @@ class MainWindow(QMainWindow):
                         if sw:
                             sw.deleteLater()
 
-    # ═══════════════════════ 缩略图就绪 ═══════════════════════
+    # ═══════════════════════ 缩略图就绪（LRU 缓存） ═══════════════════════
 
     def on_thumb_ready(self, gen, item_id, qimg):
         if gen != self.generation:
             return
-        self.thumb_cache[item_id] = qimg
+        # LRU：移动到末尾（最近使用）
+        if item_id in self.thumb_cache:
+            self.thumb_cache.move_to_end(item_id)
+        else:
+            self.thumb_cache[item_id] = qimg
+            # 超过上限时淘汰最旧的（最前面的）
+            while len(self.thumb_cache) > self._thumb_cache_max:
+                self.thumb_cache.popitem(last=False)
         w = self.thumb_widgets.get(item_id)
         if w:
             w.set_pixmap(QPixmap.fromImage(qimg))
@@ -1504,6 +1601,62 @@ class MainWindow(QMainWindow):
         self.sel_count_label.setText(f"已选择 {sel + cover_count} 页")
         self.export_count_label.setText(f"预计导出：{sel + cover_count} 张")
         self.export_btn.setEnabled(sel + cover_count > 0)
+
+    # ═══════════════════════ 懒加载（视口可见项优先） ═══════════════════════
+
+    def _load_visible_thumbs(self):
+        """只对当前视口可见的缩略图卡片生成缩略图（懒加载核心）。"""
+        if not self.all_items_current or not self.thumb_widgets:
+            return
+        gen = self.generation
+        visible_items = self._get_visible_items()
+        if not visible_items:
+            return
+        thumb_size = self.settings_cfg.get("thumb_size", THUMB_SIZE)
+        task = ThumbTask(gen, visible_items, self.signals, thumb_size)
+        self.threadpool.start(task)
+
+    def _get_visible_items(self):
+        """计算当前视口内可见的 MediaItem 列表（含上下各2行缓冲）。
+
+        如果内容不需要滚动（所有项都在视口内），返回全部。
+        """
+        if not self.all_items_current or not self.thumb_widgets:
+            return []
+        scroll = self.preview_scroll
+        sb = scroll.verticalScrollBar()
+        # 如果内容不需要滚动（滚动条不存在或不需要），返回全部
+        if sb.maximum() <= sb.minimum() + 10:
+            return list(self.all_items_current)
+
+        viewport_top = sb.value()
+        viewport_bottom = viewport_top + scroll.viewport().height()
+        # 加上下各 2 行的缓冲
+        cell_h = 216
+        buffer_rows = 2
+        expanded_top = viewport_top - buffer_rows * cell_h
+        expanded_bottom = viewport_bottom + buffer_rows * cell_h
+
+        visible = []
+        for item in self.all_items_current:
+            w = self.thumb_widgets.get(item.id)
+            if not w or not w.isVisible():
+                continue
+            pos = w.mapTo(self.preview_scroll.viewport(), w.rect().topLeft())
+            card_top = pos.y()
+            card_bottom = card_top + w.height()
+            if card_bottom >= expanded_top and card_top <= expanded_bottom:
+                visible.append(item)
+        return visible
+
+    def _setup_lazy_load(self):
+        """连接滚动信号到懒加载（在 _build_ui 中调用一次）。"""
+        self._scroll_debounce = QTimer(self)
+        self._scroll_debounce.setSingleShot(True)
+        self._scroll_debounce.setInterval(100)  # 100ms 防抖
+        self._scroll_debounce.timeout.connect(self._load_visible_thumbs)
+        self.preview_scroll.verticalScrollBar().valueChanged.connect(
+            lambda: self._scroll_debounce.start())
 
     # ═══════════════════════ 悬停导航 ═══════════════════════
 
@@ -1617,13 +1770,12 @@ class MainWindow(QMainWindow):
             return
         missed = self._check_missed_folders()
         if missed:
-            names = ", ".join(missed[:8])
-            extra = f"\n...还有 {len(missed) - 8} 个" if len(missed) > 8 else ""
+            count = len(missed)
             reply = QMessageBox.question(
-                self, "漏选提醒",
-                f"以下文件夹尚未勾选或设置封面：\n{names}{extra}\n\n仍然继续导出？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if reply != QMessageBox.Yes:
+                self, "提示",
+                f"该文件夹中还有 {count} 项未选择！\n请确认是否继续当前导出。",
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel)
+            if reply != QMessageBox.Ok:
                 return
         self.export_btn.setEnabled(False)
         self.scan_status_icon.setStyleSheet(f"color:#f59e0b; font-size:20px; font-weight:bold; background:transparent;")
