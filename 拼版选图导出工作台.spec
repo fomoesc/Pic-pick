@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec — 拼版选图导出工作台 v5.0.1"""
+"""PyInstaller spec — 拼版选图导出工作台 v5.1.0"""
 
 import os
 spec_dir = os.path.dirname(os.path.abspath(SPEC))
@@ -28,7 +28,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='拼版选图导出工作台_v5.0.1',
+    name='拼版选图导出工作台_v5.1.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
