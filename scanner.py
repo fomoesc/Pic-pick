@@ -147,12 +147,14 @@ def collect_media(folder_path: Path):
 
 
 def build_groups(folder_path: Path) -> List[MediaGroup]:
-    """按「第一层子文件夹」构建展示分组。
+    """按子文件夹构建展示分组。
 
-    规则（v4）：
-    - 文件夹下没有任何子文件夹 → 返回空列表（UI 走扁平展示，保持旧行为）；
-    - 有子文件夹 → 每个有内容的子文件夹一个分组（递归收集其内图片/PDF），
-      根目录散落的图片/PDF 归入「根目录」分组。
+    规则：
+    - 文件夹下没有任何子文件夹 → 返回空列表（UI 走扁平展示）；
+    - 有子文件夹 → 每个有内容的子文件夹一个分组；
+    - 特殊处理：如果只有一个子文件夹且名字与父文件夹相同（常见纸模结构），
+      则深入到该子文件夹内部寻找真正的子文件夹分组。
+    - 根目录散落的图片/PDF 归入「根目录」分组。
     """
     try:
         entries = sorted(os.scandir(folder_path), key=lambda e: natural_key(e.name))
@@ -163,29 +165,59 @@ def build_groups(folder_path: Path) -> List[MediaGroup]:
     if not subdirs:
         return []
 
-    groups: List[MediaGroup] = []
-    for sub in subdirs:
-        imgs, pdfs = collect_media(Path(sub.path))
-        if imgs or pdfs:
-            groups.append(MediaGroup(name=sub.name, images=imgs, pdfs=pdfs))
+    # 特殊处理：只有一个子文件夹且名字与父文件夹相同 → 深入一层
+    if len(subdirs) == 1 and subdirs[0].name == folder_path.name:
+        inner_path = Path(subdirs[0].path)
+        try:
+            inner_entries = sorted(os.scandir(inner_path), key=lambda e: natural_key(e.name))
+        except Exception:
+            inner_entries = []
+        inner_subdirs = [e for e in inner_entries if e.is_dir()]
+        if inner_subdirs:
+            # 用内层子文件夹作为分组
+            subdirs = inner_subdirs
+            # 同时收集内层根目录散落文件
+            root_imgs, root_pdfs = _collect_files_from_entries(inner_entries)
+            groups = _build_subdir_groups(subdirs)
+            if root_imgs or root_pdfs:
+                groups.append(MediaGroup(name="根目录", images=root_imgs, pdfs=root_pdfs))
+            return groups
 
-    # 根目录散落文件（作品文件夹第一层直接是文件，而非在子文件夹里）
-    root_imgs: List[Path] = []
-    root_pdfs: List[Path] = []
+    groups = _build_subdir_groups(subdirs)
+
+    # 根目录散落文件
+    root_imgs, root_pdfs = _collect_files_from_entries(entries)
+    if root_imgs or root_pdfs:
+        groups.append(MediaGroup(name="根目录", images=root_imgs, pdfs=root_pdfs))
+
+    return groups
+
+
+def _collect_files_from_entries(entries):
+    """从目录条目列表中收集散落的图片和 PDF。"""
+    imgs: List[Path] = []
+    pdfs: List[Path] = []
     for e in entries:
         if not e.is_file():
             continue
         ext = os.path.splitext(e.name)[1].lower()
         fp = Path(e.path)
         if ext in IMAGE_EXTS:
-            root_imgs.append(fp)
+            imgs.append(fp)
         elif ext == PDF_EXT:
-            root_pdfs.append(fp)
-    root_imgs.sort(key=lambda p: natural_key(p.name))
-    root_pdfs.sort(key=lambda p: natural_key(p.name))
-    if root_imgs or root_pdfs:
-        groups.append(MediaGroup(name="根目录", images=root_imgs, pdfs=root_pdfs))
+            pdfs.append(fp)
+    imgs.sort(key=lambda p: natural_key(p.name))
+    pdfs.sort(key=lambda p: natural_key(p.name))
+    return imgs, pdfs
 
+
+def _build_subdir_groups(subdirs) -> List[MediaGroup]:
+    """为每个子文件夹创建分组。"""
+    groups: List[MediaGroup] = []
+    for sub in subdirs:
+        imgs, pdfs = collect_media(Path(sub.path))
+        if imgs or pdfs:
+            groups.append(MediaGroup(name=sub.name, images=imgs, pdfs=pdfs))
     return groups
 
 
