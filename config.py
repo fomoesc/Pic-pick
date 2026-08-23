@@ -37,7 +37,7 @@ MOUSE_GESTURE_THRESHOLD = 50
 
 # ---- 应用 ----
 APP_NAME = "拼版选图导出工作台"
-APP_VERSION = "5.1.0"
+APP_VERSION = "5.1.1"
 
 # ---- 封面 ----
 # 封面缩略图高亮边框颜色（金色）
