@@ -151,11 +151,16 @@ def build_groups(folder_path: Path) -> List[MediaGroup]:
 
     规则：
     - 文件夹下没有任何子文件夹 → 返回空列表（UI 走扁平展示）；
-    - 有子文件夹 → 每个有内容的子文件夹一个分组；
-    - 特殊处理：如果只有一个子文件夹且名字与父文件夹相同（常见纸模结构），
-      则深入到该子文件夹内部寻找真正的子文件夹分组。
+    - 有子文件夹 → 递归深入：如果某个子文件夹内部还有子文件夹，
+      则用其内部子文件夹作为分组（而非把所有文件混在一起）；
+    - 同名子文件夹自动跳过（常见纸模目录结构）；
     - 根目录散落的图片/PDF 归入「根目录」分组。
     """
+    return _build_groups_recursive(folder_path)
+
+
+def _build_groups_recursive(folder_path: Path) -> List[MediaGroup]:
+    """递归构建分组。"""
     try:
         entries = sorted(os.scandir(folder_path), key=lambda e: natural_key(e.name))
     except Exception:
@@ -165,28 +170,40 @@ def build_groups(folder_path: Path) -> List[MediaGroup]:
     if not subdirs:
         return []
 
-    # 特殊处理：只有一个子文件夹且名字与父文件夹相同 → 深入一层
+    # 跳过同名子文件夹（常见纸模结构：作品文件夹/同名子文件夹/...）
     if len(subdirs) == 1 and subdirs[0].name == folder_path.name:
-        inner_path = Path(subdirs[0].path)
+        return _build_groups_recursive(Path(subdirs[0].path))
+
+    # 检查每个子文件夹是否有内部子文件夹
+    groups: List[MediaGroup] = []
+    root_imgs, root_pdfs = _collect_files_from_entries(entries)
+
+    for sub in subdirs:
+        sub_path = Path(sub.path)
         try:
-            inner_entries = sorted(os.scandir(inner_path), key=lambda e: natural_key(e.name))
+            inner_entries = sorted(os.scandir(sub_path), key=lambda e: natural_key(e.name))
         except Exception:
             inner_entries = []
         inner_subdirs = [e for e in inner_entries if e.is_dir()]
-        if inner_subdirs:
-            # 用内层子文件夹作为分组
-            subdirs = inner_subdirs
-            # 同时收集内层根目录散落文件
-            root_imgs, root_pdfs = _collect_files_from_entries(inner_entries)
-            groups = _build_subdir_groups(subdirs)
-            if root_imgs or root_pdfs:
-                groups.append(MediaGroup(name="根目录", images=root_imgs, pdfs=root_pdfs))
-            return groups
 
-    groups = _build_subdir_groups(subdirs)
+        if inner_subdirs:
+            # 该子文件夹有内部子文件夹 → 递归深入，用内部子文件夹作为分组
+            inner_groups = _build_groups_recursive(sub_path)
+            for ig in inner_groups:
+                # 在分组名前加上父文件夹名，形成路径感
+                ig.name = f"{sub.name} / {ig.name}"
+                groups.append(ig)
+            # 也收集该子文件夹根目录散落的文件
+            sub_imgs, sub_pdfs = _collect_files_from_entries(inner_entries)
+            if sub_imgs or sub_pdfs:
+                groups.append(MediaGroup(name=sub.name, images=sub_imgs, pdfs=sub_pdfs))
+        else:
+            # 该子文件夹没有内部子文件夹 → 直接作为分组
+            imgs, pdfs = collect_media(sub_path)
+            if imgs or pdfs:
+                groups.append(MediaGroup(name=sub.name, images=imgs, pdfs=pdfs))
 
     # 根目录散落文件
-    root_imgs, root_pdfs = _collect_files_from_entries(entries)
     if root_imgs or root_pdfs:
         groups.append(MediaGroup(name="根目录", images=root_imgs, pdfs=root_pdfs))
 
